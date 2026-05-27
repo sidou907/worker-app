@@ -1,0 +1,15 @@
+import pg8000.dbapi
+import ssl
+
+def get_connection():
+    context = ssl.create_default_context()
+    
+    conn = pg8000.dbapi.connect(
+        user="neondb_owner",
+        password="npg_cXHMGpT80QUt",
+        host="ep-fragrant-water-alyos8cz-pooler.c-3.eu-central-1.aws.neon.tech",
+        database="neondb",
+        port=5432,
+        ssl_context=context
+    )
+    return conn
