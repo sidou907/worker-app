@@ -135,4 +135,4 @@ def main(page: ft.Page):
     page.add(ft.SafeArea(main_layout, expand=True))
 
 port = int(os.environ.get("PORT", 8000))
-ft.app(target=main, view=ft.AppView.WEB_BROWSER, host="0.0.0.0", port=port, assets_dir="assets")
+ft.app(target=main, view=ft.AppView.WEB_BROWSER, host="0.0.0.0", port=port, assets_dir=".")
