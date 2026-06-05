@@ -19,7 +19,7 @@ DEPARTMENTS_DATA = {
     "progress_packaging": {"name": "قسم التغليف", "password": "packaging2030"}
 }
 
-SPECIAL_PARTS = ["eclisse", "chemin", "câble", "cable", "collier", "rail"]
+SPECIAL_PARTS = ["eclisse", "esclise", "chemin", "câble", "cable", "collier", "colie", "rail"]
 
 def main(page: ft.Page):
     page.title = "ISO SYSTEM - تطبيق الورشة"
@@ -241,5 +241,4 @@ def main(page: ft.Page):
 
     page.add(ft.SafeArea(main_layout, expand=True))
 
-port = int(os.environ.get("PORT", 8080))
-ft.app(target=main, view=ft.AppView.WEB_BROWSER, host="0.0.0.0", port=port, assets_dir="assets")
+ft.app(target=main, assets_dir="assets")
