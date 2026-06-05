@@ -2,33 +2,48 @@ import flet as ft
 import os
 from fiche import get_connection
 
+# ================= 1. إعدادات الأقسام، الألوان، وكلمات المرور =================
 DEP_COLORS = {
     "progress_cnc": "blue",
+    "progress_bending": "purple", 
     "progress_welding": "orange",
     "progress_painting": "pink",
     "progress_packaging": "green"
 }
+
+DEPARTMENTS_DATA = {
+    "progress_cnc": {"name": "قسم CNC", "password": "cutting1998521"},
+    "progress_bending": {"name": "قسم الثني", "password": "bending2026"},
+    "progress_welding": {"name": "قسم اللحام", "password": "soudeur2000"},
+    "progress_painting": {"name": "قسم الصباغة", "password": "painting2030"},
+    "progress_packaging": {"name": "قسم التغليف", "password": "packaging2030"}
+}
+
+SPECIAL_PARTS = ["eclisse", "chemin", "câble", "cable", "collier", "rail"]
 
 def main(page: ft.Page):
     page.title = "ISO SYSTEM - تطبيق الورشة"
     page.bgcolor = "#f0f2f5" 
     page.theme_mode = ft.ThemeMode.LIGHT 
     
-    # محاولة فرض الأيقونة على النافذة لجميع إصدارات Flet
     try:
         page.window.icon = "icon.png"
     except:
-        page.window_icon = "icon.png"
+        pass
 
     def show_snack(message, color="red"):
-        page.snack_bar = ft.SnackBar(content=ft.Text(message, color="white", weight="bold"), bgcolor=color)
-        page.snack_bar.open = True
+        snack = ft.SnackBar(content=ft.Text(message, color="white", weight="bold"), bgcolor=color)
+        page.overlay.append(snack)
+        snack.open = True
         page.update()
+
+    authenticated_dept = [None] 
 
     dep_dropdown = ft.Dropdown(
         label="اختر القسم",
         options=[
             ft.dropdown.Option("progress_cnc", "قسم CNC"),
+            ft.dropdown.Option("progress_bending", "قسم الثني"), 
             ft.dropdown.Option("progress_welding", "قسم اللحام"),
             ft.dropdown.Option("progress_painting", "قسم الصباغة"),
             ft.dropdown.Option("progress_packaging", "قسم التغليف"),
@@ -36,14 +51,44 @@ def main(page: ft.Page):
         width=280
     )
 
+    password_input = ft.TextField(
+        label="أدخل الرمز السري", password=True, can_reveal_password=True, text_align=ft.TextAlign.CENTER
+    )
+
+    def close_dialog_action():
+        password_dialog.open = False
+        password_input.value = ""
+        page.update()
+
+    def verify_password(e):
+        selected_key = dep_dropdown.value
+        correct_password = DEPARTMENTS_DATA[selected_key]["password"]
+        
+        if password_input.value == correct_password:
+            authenticated_dept[0] = selected_key 
+            close_dialog_action()
+            actual_load_tasks() 
+            show_snack(f"✅ تم الدخول إلى {DEPARTMENTS_DATA[selected_key]['name']}", "green")
+        else:
+            show_snack("❌ الرمز السري خاطئ!", "red")
+
+    password_dialog = ft.AlertDialog(
+        title=ft.Text("تأكيد الصلاحية", weight="bold"),
+        content=password_input,
+        actions=[
+            ft.TextButton("دخول", on_click=verify_password),
+            ft.TextButton("إلغاء", on_click=lambda e: close_dialog_action())
+        ]
+    )
+
     tasks_list = ft.ListView(expand=True, spacing=15)
 
-    def update_task(item_id, val):
+    # تم تعديل دالة التحديث لتستقبل اسم العمود الذي يجب تحديثه (لأن الثني أصبح فيه عمودين)
+    def update_task(item_id, val, column_to_update):
         try:
             conn = get_connection()
             cur = conn.cursor()
-            column = dep_dropdown.value
-            cur.execute(f"UPDATE order_items SET {column} = %s WHERE item_id = %s", (val, item_id))
+            cur.execute(f"UPDATE order_items SET {column_to_update} = %s WHERE item_id = %s", (val, item_id))
             conn.commit()
             cur.close()
             conn.close()
@@ -51,30 +96,63 @@ def main(page: ft.Page):
         except Exception as err:
             show_snack(f"يوجد مشكلة في الاتصال: {str(err)}", "red")
 
-    def load_tasks(e=None):
+    def try_load_tasks(e=None):
         if not dep_dropdown.value:
             show_snack("الرجاء اختيار القسم أولاً", "red")
             return
+        
+        if dep_dropdown.value != authenticated_dept[0]:
+            if password_dialog not in page.overlay:
+                page.overlay.append(password_dialog)
+            password_dialog.open = True
+            page.update()
+        else:
+            actual_load_tasks()
 
+    def actual_load_tasks():
         tasks_list.controls.clear()
         selected_color = DEP_COLORS.get(dep_dropdown.value, "blue")
+        current_column = dep_dropdown.value
         
         try:
             conn = get_connection()
             cur = conn.cursor()
-            column = dep_dropdown.value
             
-            cur.execute(f"SELECT item_id, customer_name, deadline, designation, dimensions, quantity, COALESCE({column}, 0), target_lames, target_profiles FROM order_items ORDER BY item_id DESC")
+            # جلبنا كل الأعمدة المهمة بما فيها عمود البروفيل الجديد
+            cur.execute("SELECT item_id, customer_name, deadline, designation, dimensions, quantity, target_lames, target_profiles, progress_cnc, progress_bending, progress_bending_profiles, progress_welding, progress_painting, progress_packaging FROM order_items ORDER BY item_id DESC")
             rows = cur.fetchall()
             
+            displayed_tasks_count = 0
+
             for row in rows:
-                item_id, cust, dead_str, designation, dimensions, quantity, progress, lames, profiles = row
+                item_id, cust, dead_str, designation, dimensions, quantity, lames, profiles, p_cnc, p_bend_lames, p_bend_profs, p_weld, p_paint, p_pack = row
                 
-                if "Grille linéaire" in designation:
+                # 1. الفلتر الآمن للطلبيات المنتهية (التغليف 100%)
+                try:
+                    pack_val = float(p_pack) if p_pack and str(p_pack).strip() != "" else 0.0
+                    if pack_val >= 100:
+                        continue 
+                except:
+                    pass 
+
+                # 2. التوجيه الذكي للقطع الخاصة
+                desig_lower = str(designation).lower()
+                is_special_part = any(sp in desig_lower for sp in SPECIAL_PARTS)
+
+                if is_special_part and current_column not in ["progress_cnc", "progress_bending"]:
+                    continue 
+
+                displayed_tasks_count += 1
+
+                has_lames = str(lames) not in ["0", "None", "", "0.0"]
+                has_profiles = str(profiles) not in ["0", "None", "", "0.0"]
+
+                if designation and "Grille linéaire" in designation:
                     dims = str(dimensions).split()
                     if len(dims) >= 2:
                         total_profiles = 2 * quantity
                         profiles = f"{total_profiles} بروفيل {dims[0]} و {total_profiles} بروفيل {dims[1]}"
+                        has_profiles = True
                 
                 card_content = [
                     ft.Text(f"طلب #{item_id} | {designation}", weight="bold", size=18, color=selected_color),
@@ -87,21 +165,41 @@ def main(page: ft.Page):
                     ], alignment=ft.MainAxisAlignment.START),
                 ]
                 
-                if str(lames) != "0":
-                    card_content.append(ft.Text(f"اللامات: {lames}", color="green", weight="bold", size=16))
-                
-                if str(profiles) != "0":
-                    card_content.append(ft.Text(f"البروفيل: {profiles}", color="green", weight="bold", size=16))
+                # إظهار نصوص اللامات والبروفيل في الـ CNC والثني
+                if current_column in ["progress_cnc", "progress_bending"]:
+                    if has_lames:
+                        card_content.append(ft.Text(f"اللامات: {lames}", color="green", weight="bold", size=16))
+                    if has_profiles:
+                        card_content.append(ft.Text(f"البروفيل: {profiles}", color="green", weight="bold", size=16))
                     
-                card_content.extend([
-                    ft.Text("نسبة الإنجاز:", size=14, color="grey"),
-                    ft.Slider(
-                        min=0, max=100, divisions=10, value=progress,
-                        label="{value}%",
-                        active_color=selected_color,
-                        on_change=lambda e, id=item_id: update_task(id, int(e.control.value))
-                    )
-                ])
+                # ================= بناء أشرطة الإنجاز (Sliders) =================
+                progress_dict = {
+                    "progress_cnc": p_cnc,
+                    "progress_welding": p_weld,
+                    "progress_painting": p_paint,
+                    "progress_packaging": p_pack
+                }
+                
+                if current_column == "progress_bending":
+                    # قسم الثني: شريطين منفصلين
+                    if has_lames:
+                        card_content.append(ft.Text("نسبة ثني اللامات:", size=14, color="grey"))
+                        card_content.append(ft.Slider(min=0, max=100, divisions=10, value=float(p_bend_lames or 0), label="{value}%", active_color=selected_color, on_change_end=lambda e, id=item_id: update_task(id, int(e.control.value), "progress_bending")))
+                    
+                    if has_profiles:
+                        card_content.append(ft.Text("نسبة ثني البروفيل:", size=14, color="grey"))
+                        card_content.append(ft.Slider(min=0, max=100, divisions=10, value=float(p_bend_profs or 0), label="{value}%", active_color=selected_color, on_change_end=lambda e, id=item_id: update_task(id, int(e.control.value), "progress_bending_profiles")))
+                    
+                    # في حال لم تكن هناك لامات أو بروفيل (حالة نادرة)، نظهر شريطاً عادياً
+                    if not has_lames and not has_profiles:
+                        card_content.append(ft.Text("نسبة الإنجاز:", size=14, color="grey"))
+                        card_content.append(ft.Slider(min=0, max=100, divisions=10, value=float(p_bend_lames or 0), label="{value}%", active_color=selected_color, on_change_end=lambda e, id=item_id: update_task(id, int(e.control.value), "progress_bending")))
+                
+                else:
+                    # باقي الأقسام (CNC، لحام، صباغة، تغليف): شريط واحد كالمعتاد
+                    main_progress = float(progress_dict.get(current_column) or 0)
+                    card_content.append(ft.Text("نسبة الإنجاز:", size=14, color="grey"))
+                    card_content.append(ft.Slider(min=0, max=100, divisions=10, value=main_progress, label="{value}%", active_color=selected_color, on_change_end=lambda e, id=item_id, col=current_column: update_task(id, int(e.control.value), col)))
                 
                 task_card = ft.Card(
                     elevation=4,
@@ -114,10 +212,19 @@ def main(page: ft.Page):
                 )
                 tasks_list.controls.append(task_card)
 
+            if displayed_tasks_count == 0:
+                tasks_list.controls.append(
+                    ft.Row(
+                        controls=[ft.Text("لا توجد مهام حالياً لهذا القسم 🎉", size=18, color="grey", weight="bold")],
+                        alignment=ft.MainAxisAlignment.CENTER
+                    )
+                )
+
             cur.close()
             conn.close()
             page.update()
         except Exception as err:
+            print(f"الخطأ هو: {err}")
             show_snack("الرجاء التأكد من اتصال الإنترنت أو قاعدة البيانات.", "red")
 
     main_layout = ft.Column(
@@ -125,7 +232,7 @@ def main(page: ft.Page):
             ft.Container(height=10),
             ft.Text("ISO SYSTEM - الورشة", size=24, weight="bold", color="#1e3a8a"),
             dep_dropdown,
-            ft.ElevatedButton("تحديث وعرض المهام", icon="refresh", on_click=load_tasks, bgcolor="#1e3a8a", color="white"),
+            ft.ElevatedButton("تحديث وعرض المهام", icon="refresh", on_click=try_load_tasks, bgcolor="#1e3a8a", color="white"),
             tasks_list
         ],
         expand=True,
@@ -134,5 +241,5 @@ def main(page: ft.Page):
 
     page.add(ft.SafeArea(main_layout, expand=True))
 
-port = int(os.environ.get("PORT", 8000))
-ft.app(target=main, view=ft.AppView.WEB_BROWSER, host="0.0.0.0", port=port, assets_dir=".")
+port = int(os.environ.get("PORT", 8080))
+ft.app(target=main, view=ft.AppView.WEB_BROWSER, host="0.0.0.0", port=port, assets_dir="assets")
