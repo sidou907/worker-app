@@ -1,5 +1,9 @@
 import flet as ft
 import os
+import re
+import requests
+import threading
+from datetime import datetime
 from fiche import get_connection
 
 # ================= 1. إعدادات الأقسام، الألوان، وكلمات المرور =================
@@ -8,7 +12,8 @@ DEP_COLORS = {
     "progress_bending": "purple", 
     "progress_welding": "orange",
     "progress_painting": "pink",
-    "progress_packaging": "green"
+    "progress_packaging": "green",
+    "progress_delivery": "teal"  
 }
 
 DEPARTMENTS_DATA = {
@@ -16,10 +21,26 @@ DEPARTMENTS_DATA = {
     "progress_bending": {"name": "قسم الثني", "password": "bending2026"},
     "progress_welding": {"name": "قسم اللحام", "password": "soudeur2000"},
     "progress_painting": {"name": "قسم الصباغة", "password": "painting2030"},
-    "progress_packaging": {"name": "قسم التغليف", "password": "packaging2030"}
+    "progress_packaging": {"name": "قسم التغليف", "password": "packaging2030"},
+    "progress_delivery": {"name": "قسم التسليم (Livraison)", "password": "livre2026"} 
 }
 
 SPECIAL_PARTS = ["eclisse", "esclise", "chemin", "câble", "cable", "collier", "colie", "rail"]
+
+# ================= 2. إعدادات إشعارات تيليغرام =================
+TELEGRAM_BOT_TOKEN = "8739784371:AAG1nNf74pGvUW62ylr6KRY01pM2QkoQIWw" 
+TELEGRAM_CHAT_ID = "5019932770"   
+
+def send_telegram_notification(message):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: 
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    data = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
+    try:
+        requests.post(url, data=data, timeout=5)
+    except Exception as e:
+        print("Telegram Error:", e)
+# ===============================================================
 
 def main(page: ft.Page):
     page.title = "ISO SYSTEM - تطبيق الورشة"
@@ -47,6 +68,7 @@ def main(page: ft.Page):
             ft.dropdown.Option("progress_welding", "قسم اللحام"),
             ft.dropdown.Option("progress_painting", "قسم الصباغة"),
             ft.dropdown.Option("progress_packaging", "قسم التغليف"),
+            ft.dropdown.Option("progress_delivery", "قسم التسليم (Livraison)"), 
         ],
         width=280
     )
@@ -83,7 +105,6 @@ def main(page: ft.Page):
 
     tasks_list = ft.ListView(expand=True, spacing=15)
 
-    # تم تعديل دالة التحديث لتستقبل اسم العمود الذي يجب تحديثه (لأن الثني أصبح فيه عمودين)
     def update_task(item_id, val, column_to_update):
         try:
             conn = get_connection()
@@ -95,6 +116,27 @@ def main(page: ft.Page):
             show_snack("تم حفظ التقدّم بنجاح!", "green")
         except Exception as err:
             show_snack(f"يوجد مشكلة في الاتصال: {str(err)}", "red")
+
+    # دالة تسليم الفاتورة كاملة + إرسال إشعار تيليغرام
+    def mark_as_delivered_group(item_ids_list, invoice_number, customer_name):
+        try:
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            conn = get_connection()
+            cur = conn.cursor()
+            for i_id in item_ids_list:
+                cur.execute("UPDATE order_items SET is_delivered = TRUE, delivered_at = %s WHERE item_id = %s", (now_str, i_id))
+            conn.commit()
+            cur.close()
+            conn.close()
+            
+            # إرسال الإشعار في الخلفية لكي لا يعطل واجهة التطبيق
+            msg = f"📦 *تم تسليم طلبية بنجاح!*\n\n🧾 الفاتورة: `{invoice_number}`\n👤 الزبون: *{customer_name}*\n🕒 الوقت: {now_str}"
+            threading.Thread(target=send_telegram_notification, args=(msg,), daemon=True).start()
+
+            show_snack("📦 تم تأكيد تسليم الفاتورة وتم إرسال إشعار للإدارة!", "green")
+            actual_load_tasks() 
+        except Exception as err:
+            show_snack(f"حدث خطأ أثناء التحديث: {str(err)}", "red")
 
     def try_load_tasks(e=None):
         if not dep_dropdown.value:
@@ -117,122 +159,147 @@ def main(page: ft.Page):
         try:
             conn = get_connection()
             cur = conn.cursor()
-            
-            # جلبنا كل الأعمدة المهمة بما فيها عمود البروفيل الجديد
-            cur.execute("SELECT item_id, customer_name, deadline, designation, dimensions, quantity, target_lames, target_profiles, progress_cnc, progress_bending, progress_bending_profiles, progress_welding, progress_painting, progress_packaging FROM order_items ORDER BY item_id DESC")
+            cur.execute("""
+                SELECT item_id, customer_name, deadline, designation, dimensions, quantity, target_lames, target_profiles, 
+                       progress_cnc, progress_bending, progress_bending_profiles, progress_welding, progress_painting, progress_packaging 
+                FROM order_items 
+                WHERE is_delivered = FALSE OR is_delivered IS NULL 
+                ORDER BY item_id DESC
+            """)
             rows = cur.fetchall()
             
             displayed_tasks_count = 0
 
-            for row in rows:
-                item_id, cust, dead_str, designation, dimensions, quantity, lames, profiles, p_cnc, p_bend_lames, p_bend_profs, p_weld, p_paint, p_pack = row
+            # ================= 1. نظام قسم التسليم (تجميع الفواتير) =================
+            if current_column == "progress_delivery":
+                grouped_orders = {} 
                 
-                # 1. الفلتر الآمن للطلبيات المنتهية (التغليف 100%)
-                try:
-                    pack_val = float(p_pack) if p_pack and str(p_pack).strip() != "" else 0.0
-                    if pack_val >= 100:
-                        continue 
-                except:
-                    pass 
-
-                # 2. التوجيه الذكي للقطع الخاصة
-                desig_lower = str(designation).lower()
-                is_special_part = any(sp in desig_lower for sp in SPECIAL_PARTS)
-
-                if is_special_part and current_column not in ["progress_cnc", "progress_bending"]:
-                    continue 
-
-                displayed_tasks_count += 1
-
-                has_lames = str(lames) not in ["0", "None", "", "0.0"]
-                has_profiles = str(profiles) not in ["0", "None", "", "0.0"]
-
-                if designation and "Grille linéaire" in designation:
-                    dims = str(dimensions).split()
-                    if len(dims) >= 2:
-                        total_profiles = 2 * quantity
-                        profiles = f"{total_profiles} بروفيل {dims[0]} و {total_profiles} بروفيل {dims[1]}"
-                        has_profiles = True
-                
-                card_content = [
-                    ft.Text(f"طلب #{item_id} | {designation}", weight="bold", size=18, color=selected_color),
-                    ft.Text(f"الزبون: {cust} | التسليم: {dead_str}", size=14, color="#d97706", weight="bold"),
-                    ft.Divider(height=1),
-                    ft.Row([
-                        ft.Text(f"📏 القياس: {dimensions}", weight="bold", size=16),
-                        ft.Container(width=20),
-                        ft.Text(f"🛒 الكمية: {quantity}", weight="bold", size=16),
-                    ], alignment=ft.MainAxisAlignment.START),
-                ]
-                
-                # إظهار نصوص اللامات والبروفيل في الـ CNC والثني
-                if current_column in ["progress_cnc", "progress_bending"]:
-                    if has_lames:
-                        card_content.append(ft.Text(f"اللامات: {lames}", color="green", weight="bold", size=16))
-                    if has_profiles:
-                        card_content.append(ft.Text(f"البروفيل: {profiles}", color="green", weight="bold", size=16))
+                for row in rows:
+                    item_id, cust, dead_str, designation, dimensions, quantity, lames, profiles, p_cnc, p_bend_lames, p_bend_profs, p_weld, p_paint, p_pack = row
                     
-                # ================= بناء أشرطة الإنجاز (Sliders) =================
-                progress_dict = {
-                    "progress_cnc": p_cnc,
-                    "progress_welding": p_weld,
-                    "progress_painting": p_paint,
-                    "progress_packaging": p_pack
-                }
-                
-                if current_column == "progress_bending":
-                    # قسم الثني: شريطين منفصلين
-                    if has_lames:
-                        card_content.append(ft.Text("نسبة ثني اللامات:", size=14, color="grey"))
-                        card_content.append(ft.Slider(min=0, max=100, divisions=10, value=float(p_bend_lames or 0), label="{value}%", active_color=selected_color, on_change_end=lambda e, id=item_id: update_task(id, int(e.control.value), "progress_bending")))
+                    try:
+                        pack_val = float(p_pack) if p_pack and str(p_pack).strip() != "" else 0.0
+                        if pack_val < 100: continue 
+                    except: pass
                     
-                    if has_profiles:
-                        card_content.append(ft.Text("نسبة ثني البروفيل:", size=14, color="grey"))
-                        card_content.append(ft.Slider(min=0, max=100, divisions=10, value=float(p_bend_profs or 0), label="{value}%", active_color=selected_color, on_change_end=lambda e, id=item_id: update_task(id, int(e.control.value), "progress_bending_profiles")))
+                    base_inv_id = re.sub(r'-\d+$', '', str(item_id))
                     
-                    # في حال لم تكن هناك لامات أو بروفيل (حالة نادرة)، نظهر شريطاً عادياً
-                    if not has_lames and not has_profiles:
-                        card_content.append(ft.Text("نسبة الإنجاز:", size=14, color="grey"))
-                        card_content.append(ft.Slider(min=0, max=100, divisions=10, value=float(p_bend_lames or 0), label="{value}%", active_color=selected_color, on_change_end=lambda e, id=item_id: update_task(id, int(e.control.value), "progress_bending")))
+                    if base_inv_id not in grouped_orders:
+                        grouped_orders[base_inv_id] = {
+                            "customer": cust,
+                            "deadline": dead_str,
+                            "items_details": [],
+                            "item_ids": []
+                        }
+                    
+                    grouped_orders[base_inv_id]["items_details"].append(f"▪ {designation} | القياس: {dimensions} | الكمية: {quantity}")
+                    grouped_orders[base_inv_id]["item_ids"].append(item_id)
+                    displayed_tasks_count += 1
                 
-                else:
-                    # باقي الأقسام (CNC، لحام، صباغة، تغليف): شريط واحد كالمعتاد
-                    main_progress = float(progress_dict.get(current_column) or 0)
-                    card_content.append(ft.Text("نسبة الإنجاز:", size=14, color="grey"))
-                    card_content.append(ft.Slider(min=0, max=100, divisions=10, value=main_progress, label="{value}%", active_color=selected_color, on_change_end=lambda e, id=item_id, col=current_column: update_task(id, int(e.control.value), col)))
-                
-                task_card = ft.Card(
-                    elevation=4,
-                    content=ft.Container(
-                        padding=15,
-                        bgcolor="white",
-                        border_radius=10,
-                        content=ft.Column(card_content)
+                for base_id, data in grouped_orders.items():
+                    card_content = [
+                        ft.Text(f"فاتورة / طلبية # {base_id}", weight="bold", size=22, color=selected_color),
+                        ft.Text(f"الزبون: {data['customer']} | التسليم: {data['deadline']}", size=14, color="#d97706", weight="bold"),
+                        ft.Divider(height=1),
+                        ft.Text("محتويات الفاتورة الجاهزة للتسليم:", color="grey", size=14, weight="bold")
+                    ]
+                    
+                    for item_text in data["items_details"]:
+                        card_content.append(ft.Text(item_text, size=16, weight="bold"))
+                    
+                    card_content.append(ft.Container(height=10))
+                    card_content.append(
+                        ft.ElevatedButton(
+                            content=ft.Text("📦 تأكيد تسليم الفاتورة بالكامل (Livré)", weight="bold", color="white", size=16),
+                            bgcolor="#10b981", 
+                            height=48,
+                            # هنا نمرر أرقام الطلبية، الفاتورة، واسم الزبون للدالة
+                            on_click=lambda e, ids=data["item_ids"], inv=base_id, cust=data['customer']: mark_as_delivered_group(ids, inv, cust)
+                        )
                     )
-                )
-                tasks_list.controls.append(task_card)
+                    
+                    task_card = ft.Card(elevation=4, content=ft.Container(padding=15, bgcolor="white", border_radius=10, content=ft.Column(card_content)))
+                    tasks_list.controls.append(task_card)
+
+            # ================= 2. نظام باقي الأقسام (القطع المنفصلة للتصنيع) =================
+            else:
+                for row in rows:
+                    item_id, cust, dead_str, designation, dimensions, quantity, lames, profiles, p_cnc, p_bend_lames, p_bend_profs, p_weld, p_paint, p_pack = row
+                    
+                    try:
+                        pack_val = float(p_pack) if p_pack and str(p_pack).strip() != "" else 0.0
+                        if pack_val >= 100: continue 
+                    except: pass 
+
+                    desig_lower = str(designation).lower()
+                    is_special_part = any(sp in desig_lower for sp in SPECIAL_PARTS)
+
+                    if is_special_part and current_column not in ["progress_cnc", "progress_bending"]:
+                        continue 
+
+                    displayed_tasks_count += 1
+
+                    has_lames = str(lames) not in ["0", "None", "", "0.0"]
+                    has_profiles = str(profiles) not in ["0", "None", "", "0.0"]
+
+                    if designation and "Grille linéaire" in designation:
+                        dims = str(dimensions).split()
+                        if len(dims) >= 2:
+                            total_profiles = 2 * quantity
+                            profiles = f"{total_profiles} بروفيل {dims[0]} و {total_profiles} بروفيل {dims[1]}"
+                            has_profiles = True
+                    
+                    card_content = [
+                        ft.Text(f"قطعة #{item_id} | {designation}", weight="bold", size=18, color=selected_color),
+                        ft.Text(f"الزبون: {cust} | التسليم: {dead_str}", size=14, color="#d97706", weight="bold"),
+                        ft.Divider(height=1),
+                        ft.Row([
+                            ft.Text(f"📏 القياس: {dimensions}", weight="bold", size=16),
+                            ft.Container(width=20),
+                            ft.Text(f"🛒 الكمية: {quantity}", weight="bold", size=16),
+                        ], alignment=ft.MainAxisAlignment.START),
+                    ]
+                    
+                    if current_column in ["progress_cnc", "progress_bending"]:
+                        if has_lames: card_content.append(ft.Text(f"الامـات: {lames}", color="green", weight="bold", size=16))
+                        if has_profiles: card_content.append(ft.Text(f"البروفيل: {profiles}", color="green", weight="bold", size=16))
+                        
+                    progress_dict = {"progress_cnc": p_cnc, "progress_welding": p_weld, "progress_painting": p_paint, "progress_packaging": p_pack}
+                    
+                    if current_column == "progress_bending":
+                        if has_lames:
+                            card_content.append(ft.Text("نسبة ثني اللامات:", size=14, color="grey"))
+                            card_content.append(ft.Slider(min=0, max=100, divisions=10, value=float(p_bend_lames or 0), label="{value}%", active_color=selected_color, on_change_end=lambda e, id=item_id: update_task(id, int(e.control.value), "progress_bending")))
+                        if has_profiles:
+                            card_content.append(ft.Text("نسبة ثني البروفيل:", size=14, color="grey"))
+                            card_content.append(ft.Slider(min=0, max=100, divisions=10, value=float(p_bend_profs or 0), label="{value}%", active_color=selected_color, on_change_end=lambda e, id=item_id: update_task(id, int(e.control.value), "progress_bending_profiles")))
+                        if not has_lames and not has_profiles:
+                            card_content.append(ft.Text("نسبة الإنجاز:", size=14, color="grey"))
+                            card_content.append(ft.Slider(min=0, max=100, divisions=10, value=float(p_bend_lames or 0), label="{value}%", active_color=selected_color, on_change_end=lambda e, id=item_id: update_task(id, int(e.control.value), "progress_bending")))
+                    else:
+                        main_progress = float(progress_dict.get(current_column) or 0)
+                        card_content.append(ft.Text("نسبة الإنجاز:", size=14, color="grey"))
+                        card_content.append(ft.Slider(min=0, max=100, divisions=10, value=main_progress, label="{value}%", active_color=selected_color, on_change_end=lambda e, id=item_id, col=current_column: update_task(id, int(e.control.value), col)))
+                    
+                    task_card = ft.Card(elevation=4, content=ft.Container(padding=15, bgcolor="white", border_radius=10, content=ft.Column(card_content)))
+                    tasks_list.controls.append(task_card)
 
             if displayed_tasks_count == 0:
-                tasks_list.controls.append(
-                    ft.Row(
-                        controls=[ft.Text("لا توجد مهام حالياً لهذا القسم 🎉", size=18, color="grey", weight="bold")],
-                        alignment=ft.MainAxisAlignment.CENTER
-                    )
-                )
+                tasks_list.controls.append(ft.Row(controls=[ft.Text("لا توجد مهام حالياً لهذا القسم 🎉", size=18, color="grey", weight="bold")], alignment=ft.MainAxisAlignment.CENTER))
 
             cur.close()
             conn.close()
             page.update()
         except Exception as err:
-            print(f"الخطأ هو: {err}")
-            show_snack("الرجاء التأكد من اتصال الإنترنت أو قاعدة البيانات.", "red")
+            print(f"الخطأ الفعلي: {err}")
+            show_snack(f"الخطأ هو: {str(err)}", "red")
 
     main_layout = ft.Column(
         controls=[
             ft.Container(height=10),
             ft.Text("ISO SYSTEM - الورشة", size=24, weight="bold", color="#1e3a8a"),
             dep_dropdown,
-            ft.ElevatedButton("تحديث وعرض المهام", icon="refresh", on_click=try_load_tasks, bgcolor="#1e3a8a", color="white"),
+            ft.ElevatedButton(content=ft.Text("🔄 تحديث وعرض المهام", color="white", weight="bold"), on_click=try_load_tasks, bgcolor="#1e3a8a"),
             tasks_list
         ],
         expand=True,
@@ -241,4 +308,5 @@ def main(page: ft.Page):
 
     page.add(ft.SafeArea(main_layout, expand=True))
 
-ft.app(target=main, assets_dir="assets")
+port = int(os.environ.get("PORT", 8080))
+ft.app(target=main, view=ft.AppView.WEB_BROWSER, host="0.0.0.0", port=port, assets_dir="assets")
