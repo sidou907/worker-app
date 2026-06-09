@@ -48,12 +48,13 @@ def main(page: ft.Page):
     page.theme_mode = ft.ThemeMode.LIGHT 
     
     try:
+        page.rtl = True
         page.window.icon = "icon.png"
     except:
         pass
 
     def show_snack(message, color="red"):
-        snack = ft.SnackBar(content=ft.Text(message, color="white", weight="bold"), bgcolor=color)
+        snack = ft.SnackBar(content=ft.Text(message, color="white", weight="bold"), bgcolor=color, duration=4000)
         page.overlay.append(snack)
         snack.open = True
         page.update()
@@ -84,6 +85,9 @@ def main(page: ft.Page):
 
     def verify_password(e):
         selected_key = dep_dropdown.value
+        if not selected_key:
+            return show_snack("الرجاء اختيار القسم أولاً", "red")
+            
         correct_password = DEPARTMENTS_DATA[selected_key]["password"]
         
         if password_input.value == correct_password:
@@ -109,7 +113,8 @@ def main(page: ft.Page):
         try:
             conn = get_connection()
             cur = conn.cursor()
-            cur.execute(f"UPDATE order_items SET {column_to_update} = %s WHERE item_id = %s", (val, item_id))
+            # حماية item_id ليُقرأ كنص متوافق مع الفواتير الجديدة
+            cur.execute(f"UPDATE order_items SET {column_to_update} = %s WHERE item_id = %s", (val, str(item_id)))
             conn.commit()
             cur.close()
             conn.close()
@@ -117,19 +122,17 @@ def main(page: ft.Page):
         except Exception as err:
             show_snack(f"يوجد مشكلة في الاتصال: {str(err)}", "red")
 
-    # دالة تسليم الفاتورة كاملة + إرسال إشعار تيليغرام
     def mark_as_delivered_group(item_ids_list, invoice_number, customer_name):
         try:
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             conn = get_connection()
             cur = conn.cursor()
             for i_id in item_ids_list:
-                cur.execute("UPDATE order_items SET is_delivered = TRUE, delivered_at = %s WHERE item_id = %s", (now_str, i_id))
+                cur.execute("UPDATE order_items SET is_delivered = TRUE, delivered_at = %s WHERE item_id = %s", (now_str, str(i_id)))
             conn.commit()
             cur.close()
             conn.close()
             
-            # إرسال الإشعار في الخلفية لكي لا يعطل واجهة التطبيق
             msg = f"📦 *تم تسليم طلبية بنجاح!*\n\n🧾 الفاتورة: `{invoice_number}`\n👤 الزبون: *{customer_name}*\n🕒 الوقت: {now_str}"
             threading.Thread(target=send_telegram_notification, args=(msg,), daemon=True).start()
 
@@ -167,10 +170,12 @@ def main(page: ft.Page):
                 ORDER BY item_id DESC
             """)
             rows = cur.fetchall()
+            cur.close()
+            conn.close()
             
             displayed_tasks_count = 0
 
-            # ================= 1. نظام قسم التسليم (تجميع الفواتير) =================
+            # ================= 1. نظام قسم التسليم =================
             if current_column == "progress_delivery":
                 grouped_orders = {} 
                 
@@ -213,7 +218,6 @@ def main(page: ft.Page):
                             content=ft.Text("📦 تأكيد تسليم الفاتورة بالكامل (Livré)", weight="bold", color="white", size=16),
                             bgcolor="#10b981", 
                             height=48,
-                            # هنا نمرر أرقام الطلبية، الفاتورة، واسم الزبون للدالة
                             on_click=lambda e, ids=data["item_ids"], inv=base_id, cust=data['customer']: mark_as_delivered_group(ids, inv, cust)
                         )
                     )
@@ -221,7 +225,7 @@ def main(page: ft.Page):
                     task_card = ft.Card(elevation=4, content=ft.Container(padding=15, bgcolor="white", border_radius=10, content=ft.Column(card_content)))
                     tasks_list.controls.append(task_card)
 
-            # ================= 2. نظام باقي الأقسام (القطع المنفصلة للتصنيع) =================
+            # ================= 2. نظام باقي الأقسام =================
             else:
                 for row in rows:
                     item_id, cust, dead_str, designation, dimensions, quantity, lames, profiles, p_cnc, p_bend_lames, p_bend_profs, p_weld, p_paint, p_pack = row
@@ -287,12 +291,13 @@ def main(page: ft.Page):
             if displayed_tasks_count == 0:
                 tasks_list.controls.append(ft.Row(controls=[ft.Text("لا توجد مهام حالياً لهذا القسم 🎉", size=18, color="grey", weight="bold")], alignment=ft.MainAxisAlignment.CENTER))
 
-            cur.close()
-            conn.close()
             page.update()
         except Exception as err:
-            print(f"الخطأ الفعلي: {err}")
-            show_snack(f"الخطأ هو: {str(err)}", "red")
+            error_msg = str(err)
+            if "relation" in error_msg and "does not exist" in error_msg:
+                show_snack("⚠️ قاعدة البيانات فارغة! يجب تشغيل init_db.py أولاً", "red")
+            else:
+                show_snack(f"الخطأ هو: {error_msg}", "red")
 
     main_layout = ft.Column(
         controls=[
@@ -308,5 +313,5 @@ def main(page: ft.Page):
 
     page.add(ft.SafeArea(main_layout, expand=True))
 
-port = int(os.environ.get("PORT", 8080))
-ft.app(target=main, view=ft.AppView.WEB_BROWSER, host="0.0.0.0", port=port, assets_dir="assets")
+if __name__ == "__main__":
+    ft.app(target=main)
