@@ -24,12 +24,12 @@ DEP_COLORS = {
 }
 
 DEPARTMENTS_DATA = {
-    "progress_cnc": {"name": "قسم CNC", "password": "cutting1998521"},
-    "progress_bending": {"name": "قسم الثني", "password": "bending2026"},
-    "progress_welding": {"name": "قسم اللحام", "password": "soudeur2000"},
-    "progress_painting": {"name": "قسم الصباغة", "password": "painting2030"},
-    "progress_packaging": {"name": "قسم التغليف", "password": "packaging2030"},
-    "progress_delivery": {"name": "قسم التسليم (Livraison)", "password": "livre2026"} 
+    "progress_cnc": {"name": "قسم CNC", "password": "etm001"},
+    "progress_bending": {"name": "قسم الثني", "password": "etm123"},
+    "progress_welding": {"name": "قسم اللحام", "password": "etm567"},
+    "progress_painting": {"name": "قسم الصباغة", "password": "etm003"},
+    "progress_packaging": {"name": "قسم التغليف", "password": "etm004"},
+    "progress_delivery": {"name": "قسم التسليم (Livraison)", "password": "etm111"} 
 }
 
 SPECIAL_PARTS = ["eclisse", "esclise", "chemin", "câble", "cable", "collier", "colie", "rail"]
