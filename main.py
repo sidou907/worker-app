@@ -195,11 +195,17 @@ else:
                 has_lames = str(lames) not in ["0", "None", "", "0.0"]
                 has_profiles = str(profiles) not in ["0", "None", "", "0.0"]
 
-                if designation and "Grille linéaire" in designation:
-                    dims = str(dimensions).split()
+                # كل قطعة grille linéaire تأخذ 4 بروفيلات: 2 بطول العرض و 2 بطول الارتفاع
+                # (600×200 => 2 بروفيل 600 و 2 بروفيل 200).
+                # الاسم يأتي بصيغ مختلفة ("Grille linéaire" أو "GRILLE LINEAIR ALU BLANC 600X200 ETM")
+                # والقياس قد يكون "600X200" بلا فراغ، لذلك نلتقط الأرقام بـ regex بدل split().
+                profiles_split = None
+                desig_upper = str(designation or "").upper()
+                if "GRIL" in desig_upper and ("LINEA" in desig_upper or "LINÉA" in desig_upper):
+                    dims = re.findall(r"\d+", str(dimensions or ""))
                     if len(dims) >= 2:
-                        total_profiles = 2 * quantity
-                        profiles = f"{total_profiles} بروفيل {dims[0]} و {total_profiles} بروفيل {dims[1]}"
+                        per_side = 2 * int(quantity or 0)
+                        profiles_split = (f"{per_side} بروفيل {dims[0]}", f"{per_side} بروفيل {dims[1]}")
                         has_profiles = True
 
                 displayed_tasks += 1
@@ -212,22 +218,26 @@ else:
                     
                     if current_dept in ["progress_cnc", "progress_bending"]:
                         if has_lames: st.success(f"الامـات: {lames}")
-                        if has_profiles: st.info(f"البروفيل: {profiles}")
+                        if has_profiles:
+                            if profiles_split:
+                                st.info(f"**البروفيل:**\n\n- {profiles_split[0]}\n- {profiles_split[1]}")
+                            else:
+                                st.info(f"البروفيل: {profiles}")
 
                     if current_dept == "progress_bending":
                         if has_lames:
                             k = f"bend_l_{item_id}"
-                            st.slider("نسبة ثني اللامات:", 0, 100, int(p_bend_lames or 0), step=10, key=k, on_change=update_progress, args=(item_id, "progress_bending", k))
+                            st.slider("نسبة ثني اللامات:", 0, 100, int(p_bend_lames or 0), step=10, key=k, format="%d%%", on_change=update_progress, args=(item_id, "progress_bending", k))
                         if has_profiles:
                             k = f"bend_p_{item_id}"
-                            st.slider("نسبة ثني البروفيل:", 0, 100, int(p_bend_profs or 0), step=10, key=k, on_change=update_progress, args=(item_id, "progress_bending_profiles", k))
+                            st.slider("نسبة ثني البروفيل:", 0, 100, int(p_bend_profs or 0), step=10, key=k, format="%d%%", on_change=update_progress, args=(item_id, "progress_bending_profiles", k))
                         if not has_lames and not has_profiles:
                             k = f"bend_{item_id}"
-                            st.slider("نسبة الإنجاز:", 0, 100, int(p_bend_lames or 0), step=10, key=k, on_change=update_progress, args=(item_id, "progress_bending", k))
+                            st.slider("نسبة الإنجاز:", 0, 100, int(p_bend_lames or 0), step=10, key=k, format="%d%%", on_change=update_progress, args=(item_id, "progress_bending", k))
                     else:
                         main_progress = int(progress_dict.get(current_dept) or 0)
                         k = f"{current_dept}_{item_id}"
-                        st.slider("نسبة الإنجاز:", 0, 100, main_progress, step=10, key=k, on_change=update_progress, args=(item_id, current_dept, k))
+                        st.slider("نسبة الإنجاز:", 0, 100, main_progress, step=10, key=k, format="%d%%", on_change=update_progress, args=(item_id, current_dept, k))
             
             if displayed_tasks == 0:
                 st.info("🎉 لا توجد مهام حالياً لهذا القسم. عمل رائع!")
